@@ -27,16 +27,18 @@ export function MissionDetailPage() {
   const [evidenceArtifactRef, setEvidenceArtifactRef] = useState("");
   const [evidenceExitStatus, setEvidenceExitStatus] = useState("");
 
-  const refresh = useCallback(async (): Promise<void> => {
+  const refresh = useCallback(async (): Promise<boolean> => {
     setLoading(true);
     try {
       const [nextMission, nextCapabilities] = await Promise.all([missionApi.get(decodedMissionId), missionApi.capabilities(decodedMissionId)]);
       setMission(nextMission);
       setCapabilities(nextCapabilities);
       setError(null);
+      return true;
     } catch (cause: unknown) {
-      if (cause instanceof MissionApiError && cause.code === "aborted") return;
+      if (cause instanceof MissionApiError && cause.code === "aborted") return false;
       setError(cause instanceof MissionApiError ? cause.message : "Mission details could not be loaded");
+      return false;
     } finally { setLoading(false); }
   }, [decodedMissionId]);
 
@@ -98,9 +100,10 @@ export function MissionDetailPage() {
     }
     setWorking("record_evidence");
     setError(null);
+    const timestamp = new Date().toISOString();
+    let recorded: Mission;
     try {
-      const timestamp = new Date().toISOString();
-      const recorded = await missionApi.recordEvidence(decodedMissionId, {
+      recorded = await missionApi.recordEvidence(decodedMissionId, {
         expected_revision: mission.revision ?? 0,
         evidence: {
           evidence_id: `evidence-${crypto.randomUUID()}`,
@@ -119,6 +122,13 @@ export function MissionDetailPage() {
           verification_status: evidenceStatus,
         },
       });
+    } catch (cause: unknown) {
+      const detail = cause instanceof MissionApiError ? cause.message : "The Viewer could not save the evidence record.";
+      setError(`Evidence recording failed: ${detail}`);
+      setWorking(null);
+      return;
+    }
+    try {
       const verified = await missionApi.recordVerification(decodedMissionId, {
         expected_revision: recorded.revision ?? 0,
         gate: { gate, status: evidenceStatus, evidence_refs: [recorded.evidence_records?.[recorded.evidence_records.length - 1]?.evidence_id ?? ""] },
@@ -130,9 +140,12 @@ export function MissionDetailPage() {
       setEvidenceSummary("");
       setEvidenceArtifactRef("");
       setEvidenceExitStatus("");
-    } catch (cause: unknown) {
-      setError(cause instanceof MissionApiError ? cause.message : "Evidence recording failed");
-      await refresh();
+      const refreshed = await refresh();
+      if (!refreshed) setError("Evidence and gate linkage were saved, but Viewer state refresh failed. Reload the Mission.");
+    } catch {
+      setMission(recorded);
+      const refreshed = await refresh();
+      setError(refreshed ? "The evidence record was saved, but gate linkage failed." : "The evidence record was saved, but gate linkage failed. Viewer state refresh also failed. Reload the Mission.");
     } finally { setWorking(null); }
   }
 

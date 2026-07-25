@@ -77,6 +77,10 @@ try {
   const context = await browser.newContext({ viewport: { width: 1440, height: 1000 } });
   await context.addInitScript(() => { window.__LAS_API_BASE_URL__ = "http://127.0.0.1:8765"; });
   const page = await context.newPage();
+  let missionCapabilitiesRequests = 0;
+  page.on("request", (request) => {
+    if (request.method() === "GET" && request.url().includes(`/v1/missions/`) && request.url().endsWith("/capabilities")) missionCapabilitiesRequests += 1;
+  });
 
   await page.goto(`http://127.0.0.1:${viewerPort}/`, { waitUntil: "networkidle" });
   await page.getByRole("heading", { name: "System Check" }).waitFor();
@@ -134,18 +138,7 @@ try {
   const failedRecord = current.evidence_records.find((record) => record.source === "golden-path-production-failed");
   const failedGate = current.verification_gates.find((gate) => gate.gate === "requirement");
   assert(failedRecord && failedGate?.status === "failed" && failedGate.evidence_refs.includes(failedRecord.evidence_id), "failed production evidence was not linked to the requirement gate");
-  current = await submitProductionEvidence({
-    source: "golden-path-production-passed",
-    status: "passed",
-    exitStatus: 0,
-    operation: "production evidence form passed retry",
-    summary: "Production Viewer evidence form submitted bounded passed evidence B.",
-  });
-  const passedRecord = current.evidence_records.find((record) => record.source === "golden-path-production-passed");
-  const productionGate = current.verification_gates.find((gate) => gate.gate === "requirement");
-  assert(passedRecord && failedRecord && productionGate?.status === "passed", "passed production retry did not resolve the requirement gate");
-  assert(productionGate.evidence_refs.length === 1 && productionGate.evidence_refs[0] === passedRecord.evidence_id, "passed retry retained stale failed evidence refs");
-  assert(current.evidence_records.some((record) => record.evidence_id === failedRecord.evidence_id), "failed evidence history was not retained");
+  assert(await page.getByRole("button", { name: "Begin verification", exact: true }).count() === 0, "Begin verification appeared while the requirement gate was unresolved");
   for (const gate of (current.required_verification ?? []).filter((requiredGate) => requiredGate !== "requirement")) {
     const timestamp = new Date().toISOString();
     const evidence = { evidence_id: `fixture-${gate}-${randomUUID()}`, evidence_type: fixtureTypes[gate] || "command", source: "test_fixture", operation: `fixture verification ${gate}`, started_at: timestamp, finished_at: timestamp, exit_status: 0, bounded_output_summary: `Bounded test fixture evidence for ${gate}.`, producing_agent: "p1-e2e-actor", requirement_links: [current.requirement], task_links: current.execution_plan?.tasks.map((task) => task.task_id) ?? [], plan_revision: current.plan_revision ?? 1, verification_status: "passed" };
@@ -158,13 +151,44 @@ try {
     assert(verificationResponse.ok, `verification failed for ${gate}: ${verificationResponse.status}`);
     current = await verificationResponse.json();
   }
-  const retryCapabilities = await (await fetch(`http://127.0.0.1:${apiPort}/v1/missions/${missionId}/capabilities`, { headers: apiHeaders })).json();
-  assert(retryCapabilities.allowed_events.includes("begin_verification"), "begin_verification did not become available after retry and remaining gates resolved");
-  for (const event of ["begin_verification", "complete_verification"]) {
-    const response = await fetch(`http://127.0.0.1:${apiPort}/v1/missions/${missionId}/transitions`, { method: "POST", headers: { ...apiHeaders, "content-type": "application/json" }, body: JSON.stringify({ event, idempotency_key: `e2e-${event}-${randomUUID()}`, expected_revision: current.revision }) });
-    assert(response.ok, `${event} failed: ${response.status}`);
-    current = (await response.json()).mission;
-  }
+  await page.getByRole("link", { name: "← Missions", exact: true }).click();
+  await page.getByRole("heading", { name: "Missions" }).waitFor();
+  await page.getByRole("link").filter({ hasText: "Verify the Developer Beta control plane Golden Path" }).click();
+  await page.getByRole("heading", { name: "Verify the Developer Beta control plane Golden Path" }).waitFor();
+  await page.getByRole("heading", { name: "Record bounded evidence" }).waitFor();
+  const capabilitiesBeforePassedRetry = missionCapabilitiesRequests;
+  current = await submitProductionEvidence({
+    source: "golden-path-production-passed",
+    status: "passed",
+    exitStatus: 0,
+    operation: "production evidence form passed retry",
+    summary: "Production Viewer evidence form submitted bounded passed evidence B.",
+  });
+  const passedRecord = current.evidence_records.find((record) => record.source === "golden-path-production-passed");
+  const productionGate = current.verification_gates.find((gate) => gate.gate === "requirement");
+  assert(passedRecord && failedRecord && productionGate?.status === "passed", "passed production retry did not resolve the requirement gate");
+  assert(productionGate.evidence_refs.length === 1 && productionGate.evidence_refs[0] === passedRecord.evidence_id, "passed retry retained stale failed evidence refs");
+  assert(current.evidence_records.some((record) => record.evidence_id === failedRecord.evidence_id), "failed evidence history was not retained");
+  const beginVerification = page.getByRole("button", { name: "Begin verification", exact: true });
+  await beginVerification.waitFor();
+  assert(missionCapabilitiesRequests > capabilitiesBeforePassedRetry, "final evidence write did not refresh Mission capabilities");
+  assert(await page.getByText("Production Viewer evidence form submitted bounded passed evidence B.", { exact: true }).count() === 1, "production form did not retain current evidence state");
+  const beginResponse = page.waitForResponse((response) => response.url().endsWith(`/v1/missions/${missionId}/transitions`) && response.request().method() === "POST" && response.status() === 200);
+  await beginVerification.click();
+  const beginBody = await (await beginResponse).json();
+  current = beginBody.mission;
+  assert(current.current_state === "verifying", "Begin verification did not move the Mission to verifying");
+  assert(await page.getByRole("button", { name: "Begin verification", exact: true }).count() === 0, "Begin verification remained visible after transition");
+  const evidenceForm = page.getByRole("heading", { name: "Record bounded evidence" });
+  await evidenceForm.waitFor({ state: "hidden" });
+  assert(await evidenceForm.count() === 0, "evidence form remained visible during verification");
+  const completeVerification = page.getByRole("button", { name: "Complete verification", exact: true });
+  await completeVerification.waitFor();
+  const completeResponse = page.waitForResponse((response) => response.url().endsWith(`/v1/missions/${missionId}/transitions`) && response.request().method() === "POST" && response.status() === 200);
+  await completeVerification.click();
+  const completeBody = await (await completeResponse).json();
+  current = completeBody.mission;
+  assert(current.current_state === "review_ready", "Complete verification did not reach review_ready");
   const staleRevision = await fetch(`http://127.0.0.1:${apiPort}/v1/missions/${missionId}/transitions`, { method: "POST", headers: { ...apiHeaders, "content-type": "application/json" }, body: JSON.stringify({ event: "close", idempotency_key: `e2e-stale-${randomUUID()}`, expected_revision: Math.max(0, current.revision - 1) }) });
   assert(staleRevision.status === 409, `stale revision did not return 409: ${staleRevision.status}`);
   assert((await staleRevision.json()).code === "stale_revision", "stale revision returned the wrong error code");
