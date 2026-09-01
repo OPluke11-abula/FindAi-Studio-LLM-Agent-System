@@ -28,15 +28,15 @@
     "reactflow": "^11.11.4"
   },
   "devDependencies": {
-    "@tailwindcss/postcss": "^4.3.1",
+    "@tailwindcss/postcss": "^4.3.3",
     "@tauri-apps/cli": "^2",
     "@types/dagre": "^0.7.54",
     "@types/react": "^19.1.8",
     "@types/react-dom": "^19.1.6",
     "@vitejs/plugin-react": "^6.0.3",
     "playwright": "^1.61.1",
-    "postcss": "^8.5.9",
-    "tailwindcss": "^4.3.1",
+    "postcss": "^8.5.26",
+    "tailwindcss": "^4.3.3",
     "typescript": "~6.0.3",
     "vite": "^8.1.0"
   }
